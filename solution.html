@@ -1,0 +1,645 @@
+<!DOCTYPE HTML>
+<html lang="en">
+    <meta charset="UTF-8">
+    <title>Solution</title>
+    <script src="https://cdn.plot.ly/plotly-2.8.3.min.js"></script>
+    <!-- <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css"> -->
+    <!-- <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/js/bootstrap.min.js"></script> -->
+    <style type="text/css">
+        .h1 {
+            font-size: x-large;
+            font-weight: bold;
+        }
+        .h2 {
+            font-size: large;
+            font-weight: bold;
+        }
+
+        .header {
+            padding: 20px;
+        }
+        .center {
+            text-align: center;
+        }
+        .left {
+            text-align: left;
+        }
+        .graph {
+            display: inline-block;
+            width: 500px;
+            height: 500px;
+            border-color: green;
+            border-width: 1px;
+            margin:5px;
+			padding: 5px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: [first] 49% [mid] auto [second] 49%;
+            grid-template-rows: [first-row] 500px [second-row] 500px [third-row] 500px;
+            grid-template-areas:
+                "canvas-3d pad knobs"
+                "canvas-yz pad canvas-xz"
+                "canvas-xy pad props";
+        }
+
+        #graph-3d { grid-area: canvas-3d; }
+        #graph-knobs { grid-area: knobs; }
+        #graph-YZ { grid-area: canvas-yz; }
+        #graph-XZ { grid-area: canvas-xz; }
+        #graph-XY { grid-area: canvas-xy; }
+        #graph-properties { grid-area: props; }
+
+        .form-range{
+            display: inline-block;
+            width: 300px;
+            padding-left: 20px;
+        }
+
+        .knobs {
+            line-height: 2em;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="center header h1">
+        A 3D grid visualization tool
+    </div>
+    <div class="center header h2">
+        Property: 
+        <select id="property-selector" name="Property">
+        </select>
+    </div>
+
+    <div class="container">
+        <div id="graph-3d" class="graph">&nbsp;</div>
+        <div id="graph-knobs" class="graph knobs">
+            <div>
+                <label for="x-value" class="form-label">X slice</label>
+                <input type="range" class="form-range" id="x-value" step=1>
+            </div>
+            <div>
+                <label for="y-value" class="form-label">Y slice</label>
+                <input type="range" class="form-range" id="y-value" step=1>
+            </div>
+            <div>
+                <label for="z-value" class="form-label">Z slice</label>
+                <input type="range" class="form-range" id="z-value" step=1>
+            </div>
+        </div>
+        <div id="graph-YZ" class="graph col"></div>
+        <div id="graph-XZ" class="graph col"></div>
+        <div id="graph-XY" class="graph col"></div>
+        <div id="graph-properties" class="graph col center">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Property</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody id="prop-value">
+                    <tr>
+                        <td></td>
+                        <td></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <script type="text/javascript">
+// ---- Models ----
+let inputDataFormat = function(ip, p){
+    return ip.z + ip.y*p.z + ip.x*(p.y*p.z);
+};
+
+let generate = function(dimentions, fill_func) {
+    let genArray = (dims, indexes=[]) => {
+        return new Array(dims[0]).fill(0).map((e, i) => ( dims.length == 1 ) ? fill_func([...indexes,i]) : genArray(dims.slice(1), [...indexes, i]) );
+    };
+    return genArray(dimentions);
+}
+
+let tessellate = function(num_points, step, stride=1){
+    let res = {
+        i: new Array(),
+        j: new Array(),
+        k: new Array(),
+    };
+    let cols = step - 1;
+    let rows = Math.floor(num_points / step) - 1;
+    for( let i=0; i < rows; i+=stride ){
+        for( let j=0; j < cols; j+=stride ){
+            res.i.push(i*step + j);
+            res.j.push(i*step + j + 1);
+            res.k.push((i+1)*step + j + 1);
+
+            res.i.push(i*step + j);
+            res.j.push((i+1)*step + j + 1);
+            res.k.push((i+1)*step + j);
+        }
+    }
+    return res;
+}
+
+class Point{
+    constructor(x, y, z){
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+}
+
+class ColorMap {
+    constructor(props){
+        this.type = props.template;
+        this.min_col = props.colorMin;
+        this.max_col = props.colorMax;
+        this.min_val = props.values.reduce((a, b) => Math.min(a, b));
+        this.max_val = props.values.reduce((a, b) => Math.max(a, b));
+        this.rgbs = {
+            'RED': 'rgb(255, 0, 0)',
+            'GREEN': 'rgb(0, 255, 0)',
+            'BLUE': 'rgb(0, 0, 255)',
+            'YELLOW': 'rgb(255, 255, 0)',
+            'GRAY': 'rgb(127,127,127)',
+        };
+    }
+
+    scale(){
+        return [
+            // [this.min_val, this.rgbs[this.min_col]],
+            // [this.max_val, this.rgbs[this.max_col]],
+            [0, this.rgbs[this.min_col]],
+            [1, this.rgbs[this.max_col]],
+        ];
+    }
+}
+    
+class Property {
+    constructor(props, dim){
+        this.color = new ColorMap(props);
+        this.data = new Array();
+        this.name = props.propertyName;
+        this.dim = dim;
+        if( dim.x*dim.y*dim.z != props.values.length ){
+            throw 'Values of ' + props.name + ' have invalid length';
+        }
+
+        for( let ix = 0; ix < dim.x; ++ix ){
+            this.data[ix] = new Array();
+            for( let iy = 0; iy < dim.y; ++iy ){
+                this.data[ix][iy] = new Array();
+                for( let iz = 0; iz < dim.z; ++iz ){
+                    let p = new Point(ix, iy, iz);
+                    this.data[ix][iy][iz] = props.values[inputDataFormat(p, dim)];
+
+                }
+            }
+        }
+    }
+
+    getValue(point){
+        return this.data[point.x][point.y][point.z];
+    }
+
+    surfaceX(point){
+        return {
+            x: generate([this.dim.y, this.dim.z], _ => point.x),
+            y: generate([this.dim.y, this.dim.z], i => i[0]),
+            z: generate([this.dim.y, this.dim.z], i => i[1]),
+            surfacecolor: generate([this.dim.y, this.dim.z], i => this.getValue(new Point(point.x, i[0], i[1]))),
+            colorscale: this.color.scale(),
+            type: 'surface',
+        };
+    }
+
+    surfaceY(point){
+        return {
+            x: generate([this.dim.x, this.dim.z], i => i[0]),
+            y: generate([this.dim.x, this.dim.z], i => point.y),
+            z: generate([this.dim.x, this.dim.z], i => i[1]),
+            surfacecolor: generate([this.dim.x, this.dim.z], i => this.getValue(new Point(i[0], point.y, i[1]))),
+            colorscale: this.color.scale(),
+            type: 'surface',
+        };
+    }
+    surfaceZ(point){
+        return {
+            x: generate([this.dim.x, this.dim.y], i => i[0]),
+            y: generate([this.dim.x, this.dim.y], i => i[1]),
+            z: generate([this.dim.x, this.dim.y], i => point.z),
+            surfacecolor: generate([this.dim.x, this.dim.y], i => this.getValue(new Point(i[0], i[1], point.z))),
+            colorscale: this.color.scale(),
+            type: 'surface',
+        };
+    }
+
+    meshX(point){
+        let res = {
+            x: new Array(),
+            y: new Array(),
+            z: new Array(),
+            name: 'YZ',
+            showlegend: true,
+            // colorbar: {
+            //     showticklabels: true,
+            // },
+            type: 'mesh3d',
+            intensity: new Array(),
+            colorscale: this.color.scale(),
+        };
+        let y_dim = this.dim.y*2
+        let z_dim = this.dim.z*2
+        let stride = 2;
+        for( let y=0; y < this.dim.y; ++y ){
+            for( let z=0; z < this.dim.z; ++z ){
+                let p = new Point(point.x, y, z);
+                res.x.push(point.x);
+                res.x.push(point.x);
+                res.y.push(y);
+                res.y.push(y+1);
+                res.z.push(z);
+                res.z.push(z);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+            for( let z=0; z < this.dim.z; ++z ){
+                let p = new Point(point.x, y, z);
+                res.x.push(point.x);
+                res.x.push(point.x);
+                res.y.push(y);
+                res.y.push(y+1);
+                res.z.push(z+1);
+                res.z.push(z+1);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+        } 
+        return {
+            ...res,
+            ...tessellate(y_dim*z_dim, z_dim, stride)
+        }
+    }
+
+    meshY(point){
+        let res = {
+            x: new Array(),
+            y: new Array(),
+            z: new Array(),
+            name: 'XZ',
+            showlegend: false,
+            // colorbar: {
+            //     showticklabels: false,
+            // },
+            type: 'mesh3d',
+            intensity: new Array(),
+            colorscale: this.color.scale(),
+        };
+        let x_dim = this.dim.x*2;
+        let z_dim = this.dim.z*2;
+        let stride = 2;
+        for( let x=0; x < this.dim.x; ++x ){
+            for( let z=0; z < this.dim.z; ++z ){
+                let p = new Point(x, point.y, z);
+                res.x.push(x);
+                res.x.push(x + 1);
+                res.y.push(point.y);
+                res.y.push(point.y);
+                res.z.push(z);
+                res.z.push(z);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+            for( let z=0; z < this.dim.z; ++z ){
+                let p = new Point(x, point.y, z);
+                res.x.push(x);
+                res.x.push(x+1);
+                res.y.push(point.y);
+                res.y.push(point.y);
+                res.z.push(z+1);
+                res.z.push(z+1);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+        } 
+        return {
+            ...res,
+            ...tessellate(x_dim*z_dim, z_dim, stride)
+        }
+    }
+
+
+    meshZ(point){
+        let res = {
+            x: new Array(),
+            y: new Array(),
+            z: new Array(),
+            name: 'XY',
+            showlegend: false,
+            // colorbar: {
+            //     showticklabels: false,
+            // },
+            type: 'mesh3d',
+            intensity: new Array(),
+            colorscale: this.color.scale(),
+        };
+        let x_dim = this.dim.x*2;
+        let y_dim = this.dim.y*2;
+        let stride = 2;
+        for( let x=0; x < this.dim.x; ++x ){
+            for( let y=0; y < this.dim.y; ++y ){
+                let p = new Point(x, y, point.z);
+                res.x.push(x);
+                res.x.push(x+1);
+                res.y.push(y);
+                res.y.push(y);
+                res.z.push(point.z);
+                res.z.push(point.z);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+            for( let y=0; y < this.dim.y; ++y ){
+                let p = new Point(x, y, point.z);
+                res.x.push(x);
+                res.x.push(x+1);
+                res.y.push(y+1);
+                res.y.push(y+1);
+                res.z.push(point.z);
+                res.z.push(point.z);
+                res.intensity.push(this.getValue(p));
+                res.intensity.push(this.getValue(p));
+            }
+        } 
+        return {
+            ...res,
+            ...tessellate(x_dim*y_dim, y_dim, stride)
+        }
+    }
+
+    plotX(point){
+        return ( this.color.type == 'discrete' )?  this.meshX(point) : this.surfaceX(point);
+    }
+
+    plotY(point){
+        return ( this.color.type == 'discrete' )?  this.meshY(point) : this.surfaceY(point);
+    }
+
+    plotZ(point){
+        return ( this.color.type == 'discrete' )?  this.meshZ(point) : this.surfaceZ(point);
+    }
+
+    sliceYZ(point){
+        let res = { 
+            x: [], y: [], z: [],
+            name: 'YZ',
+            type: 'contour',
+            contours: {
+                coloring: 'heatmap'
+            },
+            colorscale: this.color.scale(),
+        };
+
+        for( let iy=0; iy < this.dim.y; ++iy ){
+            for( let iz = 0; iz < this.dim.z; ++iz ){
+                res.x.push(iy);
+                res.y.push(iz);
+                res.z.push(this.data[point.x][iy][iz]);
+            }
+        }
+        return res;
+    }
+
+
+    sliceXZ(point){
+        let res = { 
+            x: [], y: [], z: [],
+            name: 'XZ',
+            type: 'contour',
+            contours: {
+                coloring: 'heatmap'
+            },
+            colorscale: this.color.scale(),
+        }
+        for( let ix=0; ix < this.dim.x; ++ix ){
+            for( let iz = 0; iz < this.dim.z; ++iz ){
+                res.x.push(ix);
+                res.y.push(iz);
+                res.z.push(this.data[ix][point.y][iz]);
+            }
+        }
+        return res;
+    }
+
+    sliceXY(point){
+        let res = { 
+            x: [], y: [], z: [],
+            name: 'XY',
+            type: 'contour',
+            contours: {
+                coloring: 'heatmap'
+            },
+            colorscale: this.color.scale(),
+        }
+        for( let ix=0; ix < this.dim.x; ++ix ){
+            for( let iy = 0; iy < this.dim.y; ++iy ){
+                res.x.push(ix);
+                res.y.push(iy);
+                res.z.push(this.data[ix][iy][point.z]);
+            }
+        }
+        return res;
+    }
+
+    heatYZ(point){
+        let res = {
+            z: generate([this.dim.y, this.dim.z], i => this.getValue(new Point(point.x, i[0], i[1]))),
+            x: new Array(this.dim.y).fill(0).map((e, i) => i),
+            y: new Array(this.dim.z).fill(0).map((e, i) => i),
+            name: 'YZ',
+            type: 'heatmap',
+            colorscale: this.color.scale(),
+        };
+        return res;
+    }
+
+    heatXZ(point){
+        let res = {
+            z: generate([this.dim.x, this.dim.z], i => this.getValue(new Point(i[0], point.y, i[1]))),
+            x: new Array(this.dim.x).fill(0).map((e, i) => i),
+            y: new Array(this.dim.z).fill(0).map((e, i) => i),
+            name: 'XZ',
+            type: 'heatmap',
+            colorscale: this.color.scale(),
+        };
+        return res;
+    }
+
+    heatXY(point){
+        let res = {
+            z: generate([this.dim.x, this.dim.y], i => this.getValue(new Point(i[0], i[1], point.z))),
+            x: new Array(this.dim.x).fill(0).map((e, i) => i),
+            y: new Array(this.dim.y).fill(0).map((e, i) => i),
+            name: 'XY',
+            type: 'heatmap',
+            colorscale: this.color.scale(),
+        };
+        return res;
+    }
+
+
+    plotYZ(point){
+        return ( this.color.type == 'discrete' )?  this.heatYZ(point) : this.sliceYZ(point);
+    }
+
+    plotXZ(point){
+        return ( this.color.type == 'discrete' )?  this.heatXZ(point) : this.sliceXZ(point);
+    }
+
+    plotXY(point){
+        return ( this.color.type == 'discrete' )?  this.heatXY(point) : this.sliceXY(point);
+    }
+
+}
+
+class Data {
+    constructor(data, elements) {
+        this.field = data.Field;
+        this.dims = new Point(data.Xdim, data.Ydim, data.Zdim);
+        this.properties = new Array();
+        this.curPoint = new Point(Math.floor(this.dims.x/2), Math.floor(this.dims.y/2), Math.floor(this.dims.z/2));
+        this.elements = elements;
+        for( let i = 0; i < data.Properties.length; ++i ){
+            this.properties[i] = new Property(data.Properties[i], this.dims);
+            let option_elem = document.createElement('option');
+            option_elem.value = i
+            option_elem.innerText = this.properties[i].name;
+
+            this.elements.property_selector.appendChild(option_elem);
+        }
+        this.selected = 0;
+
+        // handlers
+        this.elements.x_slider.min = 0;
+        this.elements.x_slider.value = this.dims.x;
+        this.elements.x_slider.max = this.dims.x-1;
+        this.elements.x_slider.oninput = (val) => { 
+            this.curPoint = new Point(
+                parseInt(this.elements.x_slider.value),
+                this.curPoint.y,
+                this.curPoint.z
+            );
+            this.render();
+        };
+
+        this.elements.y_slider.min = 0;
+        this.elements.y_slider.value = this.dims.y;
+        this.elements.y_slider.max = this.dims.y-1;
+        this.elements.y_slider.oninput = (val) => { 
+            this.curPoint = new Point(
+                this.curPoint.x,
+                parseInt(this.elements.y_slider.value),
+                this.curPoint.z
+            );
+            this.render();
+        };
+
+        this.elements.z_slider.min = 0;
+        this.elements.z_slider.value = this.dims.z;
+        this.elements.z_slider.max = this.dims.z-1;
+        this.elements.z_slider.oninput = (val) => { 
+            this.curPoint = new Point(
+                this.curPoint.x,
+                this.curPoint.y,
+                parseInt(this.elements.z_slider.value),
+            );
+            this.render();
+        };
+
+        this.elements.property_selector.onchange = (e) => {
+            this.selected = e.target.value;
+            this.render();
+        }
+    }
+
+    getMesh() {
+        return [
+            this.properties[this.selected].plotX(this.curPoint),
+            this.properties[this.selected].plotY(this.curPoint),
+            this.properties[this.selected].plotZ(this.curPoint),
+        ];
+    }
+
+    getSliceXY() {
+        return [this.properties[this.selected].plotXY(this.curPoint)];
+    }
+    
+    getSliceXZ() {
+        return [this.properties[this.selected].plotXZ(this.curPoint)];
+    }
+
+    getSliceYZ() {
+        return [this.properties[this.selected].plotYZ(this.curPoint)];
+
+    }
+
+    printProperties(){
+        while( this.elements.prop_values.firstChild ){
+            this.elements.prop_values.firstChild.remove();
+        }
+        let renderRow = (name, value) => {
+            let row = document.createElement('tr')
+            let name_el = document.createElement('td');
+            name_el.innerText = name.toString();
+            row.appendChild(name_el);
+
+            let value_el = document.createElement('td');
+            value_el.innerText = value.toString();
+            row.appendChild(value_el);
+            return row;
+        };
+        this.elements.prop_values.appendChild(renderRow('X', this.curPoint.x));
+        this.elements.prop_values.appendChild(renderRow('Y', this.curPoint.y));
+        this.elements.prop_values.appendChild(renderRow('Z', this.curPoint.z));
+
+        for( let i = 0; i < this.properties.length; ++i ){
+            this.elements.prop_values.appendChild(renderRow(this.properties[i].name, this.properties[i].getValue(this.curPoint)));
+        }
+    }
+
+    render(){
+        let graph_3d = Plotly.newPlot( this.elements.canvas_3d, this.getMesh(), { margin: { t: 25 }, title: "3D view" } );
+        let graph_xy = Plotly.newPlot( this.elements.canvas_xy, this.getSliceXY(), { margin: {t: 25}, title: "XY view" });
+        let graph_xz = Plotly.newPlot( this.elements.canvas_xz, this.getSliceXZ(), { margin: {t: 25}, title: "XZ view" });
+        let graph_yz = Plotly.newPlot( this.elements.canvas_yz, this.getSliceYZ(), { margin: {t: 25}, title: "YZ view" });
+        this.printProperties();
+    }
+}
+
+// ---- Init data ----
+var elements = {
+    canvas_3d: document.getElementById('graph-3d'),
+    canvas_yz: document.getElementById('graph-YZ'),
+    canvas_xz: document.getElementById('graph-XZ'),
+    canvas_xy: document.getElementById('graph-XY'),
+    
+    property_selector: document.getElementById("property-selector"),
+    x_slider: document.getElementById("x-value"),
+    y_slider: document.getElementById("y-value"),
+    z_slider: document.getElementById("z-value"),
+
+    prop_values: document.getElementById('prop-value'),
+};
+
+
+var url = "https://storage.yandexcloud.net/shiftenter-slb-bucket-2022/Task4_Example_fix.json";
+var pData;
+fetch(url).then(res => res.json()).then(d => {
+    pData = new Data(d, elements);
+    pData.render();
+});
+
+    </script>
+</body>
